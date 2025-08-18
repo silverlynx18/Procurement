@@ -1,0 +1,16 @@
+dash
+gunicorn
+pandas
+psycopg2-binary
+selenium
+beautifulsoup4
+xgboost
+scikit-learn
+requests
+plotly
+PyPDF2
+Faker
+shap
+matplotlib
+markdown-pdf
+dash-bootstrap-components
