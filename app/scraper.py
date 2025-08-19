@@ -1,0 +1,194 @@
+import os
+import time
+import requests
+import PyPDF2
+import io
+import sys
+from urllib.parse import urljoin
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import WebDriverException
+from datetime import datetime, timedelta
+from app import database
+
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+
+def setup_webdriver():
+    chrome_options = Options()
+    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument(f"user-agent={USER_AGENT}")
+    try:
+        return webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        print(f"!!! WebDriver initialization error: {e}")
+        return None
+
+def extract_text_from_pdf(pdf_content):
+    try:
+        reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
+        text = "".join(page.extract_text() for page in reader.pages if page.extract_text())
+        return text.strip() or None
+    except Exception:
+        return None
+
+def download_documents_from_url(driver, agency_id, conn, page_url, doc_type):
+    try:
+        driver.get(page_url)
+        time.sleep(1)
+        pdf_urls = {urljoin(page_url, link.get_attribute('href')) for link in driver.find_elements(By.TAG_NAME, 'a') if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
+
+        cur = conn.cursor()
+        for pdf_url in pdf_urls:
+            cur.execute("SELECT 1 FROM documents WHERE url = ?", (pdf_url,))
+            if cur.fetchone(): continue
+
+            try:
+                response = requests.get(pdf_url, headers={'User-Agent': USER_AGENT}, timeout=30)
+                response.raise_for_status()
+                text = extract_text_from_pdf(response.content)
+                if text:
+                    pub_date = datetime.now().strftime('%Y-%m-%d')
+                    scraped_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    cur.execute("INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES (?, ?, ?, ?, ?, ?)", (agency_id, doc_type, pdf_url, text, scraped_date, pub_date))
+                conn.commit()
+            except requests.RequestException:
+                pass
+    except WebDriverException:
+        pass
+
+def scrape_all_agencies(target_agency_ids=None):
+    print("  - Scraping agency documents...")
+    driver = setup_webdriver()
+    conn = database.get_db_connection()
+    if not driver or not conn: return
+
+    cur = conn.cursor()
+    if target_agency_ids:
+        print(f"    - Scraping for {len(target_agency_ids)} target agencies.")
+        placeholders = ','.join('?' for _ in target_agency_ids)
+        cur.execute(f"SELECT agency_id, name, planning_url, minutes_url FROM agencies WHERE agency_id IN ({placeholders})", target_agency_ids)
+    else:
+        print("    - Scraping for all agencies.")
+        cur.execute("SELECT agency_id, name, planning_url, minutes_url FROM agencies")
+    agencies = cur.fetchall()
+
+    for agency_id, name, planning_url, minutes_url in agencies:
+        print(f"    - Checking '{name}' for documents...")
+        if planning_url:
+            download_documents_from_url(driver, agency_id, conn, planning_url, "Planning Document")
+        if minutes_url:
+            download_documents_from_url(driver, agency_id, conn, minutes_url, "Meeting Minutes")
+
+    driver.quit()
+    conn.close()
+
+def scrape_news_for_agencies(target_agency_ids=None):
+    print("  - Harvesting news articles...")
+    api_key = os.environ.get('NEWS_API_KEY')
+    if not api_key or 'YOUR_ACTUAL_API_KEY' in api_key:
+        print("    - WARNING: NEWS_API_KEY not set. Skipping.")
+        return
+
+    conn = database.get_db_connection()
+    if not conn: return
+
+    cur = conn.cursor()
+    if target_agency_ids:
+        print(f"    - Harvesting news for {len(target_agency_ids)} target agencies.")
+        placeholders = ','.join('?' for _ in target_agency_ids)
+        cur.execute(f"SELECT agency_id, name FROM agencies WHERE agency_id IN ({placeholders})", target_agency_ids)
+    else:
+        print("    - Harvesting news for a random selection of 20 agencies.")
+        cur.execute("SELECT agency_id, name FROM agencies ORDER BY RANDOM() LIMIT 20")
+    agencies_to_query = cur.fetchall()
+
+    from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    for agency_id, agency_name in agencies_to_query:
+        print(f"    - Searching news for '{agency_name}'...")
+        query = f'"{agency_name}" AND (transportation OR transit OR procurement)'
+        url = f"https://newsapi.org/v2/everything?q={requests.utils.quote(query)}&from={from_date}&sortBy=relevancy&apiKey={api_key}"
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            articles = response.json().get('articles', [])
+            if not articles: continue
+
+            for a in articles[:5]:
+                try:
+                    cur.execute("INSERT INTO news_articles (agency_id, article_url, title, source_name, published_date, content) VALUES (?, ?, ?, ?, ?, ?)",
+                                (agency_id, a['url'], a['title'], a['source']['name'], a['publishedAt'], a.get('description')))
+                except conn.IntegrityError:
+                    pass # Ignore duplicates
+            conn.commit()
+            time.sleep(1)
+        except requests.RequestException as e:
+            print(f"      - ERROR fetching news: {e}")
+            pass
+    if conn: conn.close()
+
+def scrape_historical_solicitations_from_sam(years=5):
+    print("--- Scraping Historical Solicitations from SAM.gov ---")
+    api_key = os.environ.get('SAM_API_KEY')
+    if not api_key or 'YOUR_SAM_API_KEY' in api_key:
+        print("    - CRITICAL: SAM_API_KEY not set in .env file. Cannot scrape historical data.")
+        return
+
+    conn = database.get_db_connection()
+    if not conn: return
+
+    ITS_NAICS_CODES = ["541512", "541330", "541715", "334511"]
+    today = datetime.now()
+    cur = conn.cursor()
+
+    for year_offset in range(years):
+        target_year = today.year - year_offset
+        posted_from = f"01/01/{target_year}"
+        posted_to = f"12/31/{target_year}"
+        print(f"  - Fetching data for year: {target_year}")
+
+        for ncode in ITS_NAICS_CODES:
+            offset = 0
+            while True:
+                params = {'api_key': api_key, 'postedFrom': posted_from, 'postedTo': posted_to, 'ncode': ncode, 'limit': 1000, 'offset': offset}
+                try:
+                    response = requests.get("https://api.sam.gov/opportunities/v2/search", params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    opportunities = data.get("opportunitiesData", [])
+                    if not opportunities: break
+
+                    for opp in opportunities:
+                        cur.execute("SELECT agency_id FROM agencies WHERE name LIKE ?", (f"%{opp.get('fullParentPathName', '')}%",))
+                        agency_result = cur.fetchone()
+                        agency_id = agency_result[0] if agency_result else None
+                        release_date = opp.get('postedDate')
+                        title = opp.get('title')
+                        url = opp.get('uiLink')
+
+                        if release_date and title and url:
+                            try:
+                                cur.execute("INSERT INTO historical_solicitations (agency_id, release_date, title, url, keywords) VALUES (?, ?, ?, ?, ?)",
+                                            (agency_id, release_date, title, url, ncode))
+                            except conn.IntegrityError:
+                                pass # Ignore duplicates
+
+                    conn.commit()
+                    if len(opportunities) < 1000: break
+                    offset += 1000
+                    time.sleep(1)
+                except requests.RequestException as e:
+                    print(f"    - ERROR fetching data for NAICS {ncode}: {e}")
+                    break
+    conn.close()
+    print("--- Historical scraping complete. ---")
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == '--historical':
+        scrape_historical_solicitations_from_sam()
+    else:
+        print("Running standard scrapers...")
+        scrape_all_agencies()
+        scrape_news_for_agencies()
