@@ -56,14 +56,13 @@ def get_regional_agency_ids(region_name):
     print(f"--- Total agencies to scrape for {region_name}: {len(final_ids)} ---")
     return final_ids
 
-def main():
-    parser = argparse.ArgumentParser(description="Run a targeted regional scrape.")
-    parser.add_argument("region_name", type=str, help="The name of the region to scrape (e.g., 'Houston').")
-    args = parser.parse_args()
+def run_scrape_for_region(region_name):
+    """
+    Orchestrates the scraping process for a given region.
+    """
+    print(f"--- Starting regional scrape for '{region_name}' ---")
 
-    print(f"--- Starting regional scrape for '{args.region_name}' ---")
-
-    target_ids = get_regional_agency_ids(args.region_name)
+    target_ids = get_regional_agency_ids(region_name)
 
     if not target_ids:
         print("No agencies found for the specified region. Exiting.")
@@ -73,7 +72,16 @@ def main():
     scraper.scrape_all_agencies(target_agency_ids=target_ids)
     scraper.scrape_news_for_agencies(target_agency_ids=target_ids)
 
-    print(f"--- Regional scrape for '{args.region_name}' complete. ---")
+    print(f"--- Regional scrape for '{region_name}' complete. ---")
+
+def main():
+    """
+    Parses command-line arguments and runs the regional scrape.
+    """
+    parser = argparse.ArgumentParser(description="Run a targeted regional scrape.")
+    parser.add_argument("region_name", type=str, help="The name of the region to scrape (e.g., 'Houston').")
+    args = parser.parse_args()
+    run_scrape_for_region(args.region_name)
 
 if __name__ == '__main__':
     main()

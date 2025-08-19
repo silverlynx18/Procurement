@@ -4,6 +4,7 @@ import requests
 import PyPDF2
 import io
 import sys
+import json
 from urllib.parse import urljoin
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -13,6 +14,8 @@ from datetime import datetime, timedelta
 from app import database
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
+OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434') # Default to localhost for non-Docker
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3')
 
 def setup_webdriver():
     chrome_options = Options()
@@ -34,32 +37,77 @@ def extract_text_from_pdf(pdf_content):
     except Exception:
         return None
 
-def download_documents_from_url(driver, agency_id, conn, page_url, doc_type):
+def find_document_links_with_ai(html_content):
+    """
+    Uses an LLM to find document links in the HTML of a page.
+    """
+    print("      - Using AI to find document links...")
+    prompt = f"""
+    You are an expert web scraping assistant. Analyze the following HTML content and identify all hyperlinks (`<a>` tags) that likely lead to transportation planning documents. These documents might be called 'Metropolitan Transportation Plan', 'Transportation Improvement Program', 'Long-Range Plan', 'Meeting Minutes', 'Agendas', 'ITS Architecture', or similar.
+
+    Return ONLY a JSON object with a single key "document_urls", where the value is a list of the full, absolute URLs. Do not include duplicates. If no relevant documents are found, return an empty list.
+
+    HTML Content:
+    ```html
+    {html_content}
+    ```
+    """
+    try:
+        response = requests.post(f"{OLLAMA_URL}/api/generate", json={"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}, headers={'Content-Type': 'application/json'})
+        response.raise_for_status()
+
+        response_text = response.json().get('response', '{}').strip()
+        # Find the JSON part of the response, in case the LLM adds extra text
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
+        if json_start == -1 or json_end == 0:
+            print("      - AI did not return a valid JSON object.")
+            return []
+
+        json_response = json.loads(response_text[json_start:json_end])
+        urls = json_response.get("document_urls", [])
+        print(f"      - AI identified {len(urls)} potential document links.")
+        return urls
+    except Exception as e:
+        print(f"      - ERROR connecting to the AI model or parsing its response: {e}")
+        return []
+
+def download_documents_from_url(driver, agency_id, conn, page_url, doc_type, use_ai_finder=False):
     try:
         driver.get(page_url)
-        time.sleep(1)
-        pdf_urls = {urljoin(page_url, link.get_attribute('href')) for link in driver.find_elements(By.TAG_NAME, 'a') if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
+        time.sleep(2) # Allow time for dynamic content to load
+
+        doc_urls = []
+        if use_ai_finder:
+            html_content = driver.page_source
+            doc_urls = find_document_links_with_ai(html_content)
+        else:
+            # Fallback to simple PDF link finding
+            doc_urls = {urljoin(page_url, link.get_attribute('href')) for link in driver.find_elements(By.TAG_NAME, 'a') if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
 
         cur = conn.cursor()
-        for pdf_url in pdf_urls:
-            cur.execute("SELECT 1 FROM documents WHERE url = ?", (pdf_url,))
+        for doc_url in doc_urls:
+            cur.execute("SELECT 1 FROM documents WHERE url = ?", (doc_url,))
             if cur.fetchone(): continue
 
+            print(f"        - Downloading document: {doc_url}")
             try:
-                response = requests.get(pdf_url, headers={'User-Agent': USER_AGENT}, timeout=30)
+                response = requests.get(doc_url, headers={'User-Agent': USER_AGENT}, timeout=30)
                 response.raise_for_status()
                 text = extract_text_from_pdf(response.content)
                 if text:
                     pub_date = datetime.now().strftime('%Y-%m-%d')
                     scraped_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    cur.execute("INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES (?, ?, ?, ?, ?, ?)", (agency_id, doc_type, pdf_url, text, scraped_date, pub_date))
+                    cur.execute("INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES (?, ?, ?, ?, ?, ?)", (agency_id, doc_type, doc_url, text, scraped_date, pub_date))
                 conn.commit()
-            except requests.RequestException:
+            except requests.RequestException as e:
+                print(f"          - ERROR downloading document: {e}")
                 pass
-    except WebDriverException:
+    except WebDriverException as e:
+        print(f"      - ERROR accessing page {page_url}: {e}")
         pass
 
-def scrape_all_agencies(target_agency_ids=None):
+def scrape_all_agencies(target_agency_ids=None, use_ai_finder=False):
     print("  - Scraping agency documents...")
     driver = setup_webdriver()
     conn = database.get_db_connection()
@@ -78,13 +126,14 @@ def scrape_all_agencies(target_agency_ids=None):
     for agency_id, name, planning_url, minutes_url in agencies:
         print(f"    - Checking '{name}' for documents...")
         if planning_url:
-            download_documents_from_url(driver, agency_id, conn, planning_url, "Planning Document")
+            download_documents_from_url(driver, agency_id, conn, planning_url, "Planning Document", use_ai_finder)
         if minutes_url:
-            download_documents_from_url(driver, agency_id, conn, minutes_url, "Meeting Minutes")
+            download_documents_from_url(driver, agency_id, conn, minutes_url, "Meeting Minutes", use_ai_finder)
 
     driver.quit()
     conn.close()
 
+# The rest of the file remains the same... (scrape_news_for_agencies, scrape_historical_solicitations_from_sam)
 def scrape_news_for_agencies(target_agency_ids=None):
     print("  - Harvesting news articles...")
     api_key = os.environ.get('NEWS_API_KEY')
