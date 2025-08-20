@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from app import database
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36"
-OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434') # Default to localhost for non-Docker
+OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'llama3')
 
 def setup_webdriver():
@@ -75,30 +75,47 @@ def find_document_links_with_ai(html_content):
 def download_documents_from_url(driver, agency_id, conn, page_url, doc_type, use_ai_finder=False):
     try:
         driver.get(page_url)
-        time.sleep(2) # Allow time for dynamic content to load
+        time.sleep(2)  # Allow time for dynamic content to load
 
         doc_urls = []
         if use_ai_finder:
             html_content = driver.page_source
-            doc_urls = find_document_links_with_ai(html_content)
+            ai_urls = find_document_links_with_ai(html_content)
+            # Make sure URLs are absolute
+            doc_urls = [urljoin(page_url, url) for url in ai_urls]
         else:
             # Fallback to simple PDF link finding
-            doc_urls = {urljoin(page_url, link.get_attribute('href')) for link in driver.find_elements(By.TAG_NAME, 'a') if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
+            pdf_links = driver.find_elements(By.TAG_NAME, 'a')
+            doc_urls = {urljoin(page_url, link.get_attribute('href')) for link in pdf_links if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
 
         cur = conn.cursor()
+        p_style = database.get_param_style()
+
+        print(f"      - Found {len(doc_urls)} links to process.")
         for doc_url in doc_urls:
-            cur.execute("SELECT 1 FROM documents WHERE url = ?", (doc_url,))
+            cur.execute(f"SELECT 1 FROM documents WHERE url = {p_style}", (doc_url,))
             if cur.fetchone(): continue
 
             print(f"        - Downloading document: {doc_url}")
             try:
                 response = requests.get(doc_url, headers={'User-Agent': USER_AGENT}, timeout=30)
                 response.raise_for_status()
+
+                # Basic check for PDF content type
+                if 'application/pdf' not in response.headers.get('Content-Type', ''):
+                    print("          - Skipping non-PDF link.")
+                    continue
+
                 text = extract_text_from_pdf(response.content)
                 if text:
-                    pub_date = datetime.now().strftime('%Y-%m-%d')
-                    scraped_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    cur.execute("INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES (?, ?, ?, ?, ?, ?)", (agency_id, doc_type, doc_url, text, scraped_date, pub_date))
+                    now_func = "NOW()" if database.get_db_type() == 'postgres' else "datetime('now')"
+                    sql = f"INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES ({p_style}, {p_style}, {p_style}, {p_style}, {now_func}, {p_style}) {database.get_on_conflict_clause()}"
+
+                    try:
+                        cur.execute(sql, (agency_id, doc_type, doc_url, text, datetime.now().date()))
+                    except Exception as e:
+                        if "UNIQUE constraint failed" in str(e): pass
+                        else: raise e
                 conn.commit()
             except requests.RequestException as e:
                 print(f"          - ERROR downloading document: {e}")
@@ -112,11 +129,11 @@ def scrape_all_agencies(target_agency_ids=None, use_ai_finder=False):
     driver = setup_webdriver()
     conn = database.get_db_connection()
     if not driver or not conn: return
-
     cur = conn.cursor()
+
     if target_agency_ids:
         print(f"    - Scraping for {len(target_agency_ids)} target agencies.")
-        placeholders = ','.join('?' for _ in target_agency_ids)
+        placeholders = ','.join(database.get_param_style() for _ in target_agency_ids)
         cur.execute(f"SELECT agency_id, name, planning_url, minutes_url FROM agencies WHERE agency_id IN ({placeholders})", target_agency_ids)
     else:
         print("    - Scraping for all agencies.")
@@ -133,7 +150,6 @@ def scrape_all_agencies(target_agency_ids=None, use_ai_finder=False):
     driver.quit()
     conn.close()
 
-# The rest of the file remains the same... (scrape_news_for_agencies, scrape_historical_solicitations_from_sam)
 def scrape_news_for_agencies(target_agency_ids=None):
     print("  - Harvesting news articles...")
     api_key = os.environ.get('NEWS_API_KEY')
@@ -143,15 +159,14 @@ def scrape_news_for_agencies(target_agency_ids=None):
 
     conn = database.get_db_connection()
     if not conn: return
-
     cur = conn.cursor()
+
     if target_agency_ids:
-        print(f"    - Harvesting news for {len(target_agency_ids)} target agencies.")
-        placeholders = ','.join('?' for _ in target_agency_ids)
+        placeholders = ','.join(database.get_param_style() for _ in target_agency_ids)
         cur.execute(f"SELECT agency_id, name FROM agencies WHERE agency_id IN ({placeholders})", target_agency_ids)
     else:
-        print("    - Harvesting news for a random selection of 20 agencies.")
-        cur.execute("SELECT agency_id, name FROM agencies ORDER BY RANDOM() LIMIT 20")
+        order_by = "RANDOM()" if database.get_db_type() == 'sqlite' else "RANDOM()"
+        cur.execute(f"SELECT agency_id, name FROM agencies ORDER BY {order_by} LIMIT 20")
     agencies_to_query = cur.fetchall()
 
     from_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
@@ -166,11 +181,8 @@ def scrape_news_for_agencies(target_agency_ids=None):
             if not articles: continue
 
             for a in articles[:5]:
-                try:
-                    cur.execute("INSERT INTO news_articles (agency_id, article_url, title, source_name, published_date, content) VALUES (?, ?, ?, ?, ?, ?)",
-                                (agency_id, a['url'], a['title'], a['source']['name'], a['publishedAt'], a.get('description')))
-                except conn.IntegrityError:
-                    pass # Ignore duplicates
+                sql = f"INSERT {database.get_on_conflict_clause()} INTO news_articles (agency_id, article_url, title, source_name, published_date, content) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()})"
+                cur.execute(sql, (agency_id, a['url'], a['title'], a['source']['name'], a['publishedAt'], a.get('description')))
             conn.commit()
             time.sleep(1)
         except requests.RequestException as e:
@@ -187,10 +199,10 @@ def scrape_historical_solicitations_from_sam(years=5):
 
     conn = database.get_db_connection()
     if not conn: return
+    cur = conn.cursor()
 
     ITS_NAICS_CODES = ["541512", "541330", "541715", "334511"]
     today = datetime.now()
-    cur = conn.cursor()
 
     for year_offset in range(years):
         target_year = today.year - year_offset
@@ -210,7 +222,8 @@ def scrape_historical_solicitations_from_sam(years=5):
                     if not opportunities: break
 
                     for opp in opportunities:
-                        cur.execute("SELECT agency_id FROM agencies WHERE name LIKE ?", (f"%{opp.get('fullParentPathName', '')}%",))
+                        like_op = "LIKE" if database.get_db_type() == 'sqlite' else "ILIKE"
+                        cur.execute(f"SELECT agency_id FROM agencies WHERE name {like_op} {database.get_param_style()}", (f"%{opp.get('fullParentPathName', '')}%",))
                         agency_result = cur.fetchone()
                         agency_id = agency_result[0] if agency_result else None
                         release_date = opp.get('postedDate')
@@ -218,11 +231,9 @@ def scrape_historical_solicitations_from_sam(years=5):
                         url = opp.get('uiLink')
 
                         if release_date and title and url:
-                            try:
-                                cur.execute("INSERT INTO historical_solicitations (agency_id, release_date, title, url, keywords) VALUES (?, ?, ?, ?, ?)",
-                                            (agency_id, release_date, title, url, ncode))
-                            except conn.IntegrityError:
-                                pass # Ignore duplicates
+                            sql = f"INSERT {database.get_on_conflict_clause()} INTO historical_solicitations (agency_id, release_date, title, url, keywords) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()})"
+                            keywords_val = ncode if database.get_db_type() == 'sqlite' else [ncode]
+                            cur.execute(sql, (agency_id, release_date, title, url, keywords_val))
 
                     conn.commit()
                     if len(opportunities) < 1000: break

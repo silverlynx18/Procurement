@@ -56,11 +56,13 @@ def get_regional_agency_ids(region_name):
     print(f"--- Total agencies to scrape for {region_name}: {len(final_ids)} ---")
     return final_ids
 
-def run_scrape_for_region(region_name):
+def run_scrape_for_region(region_name, use_ai_finder=False):
     """
     Orchestrates the scraping process for a given region.
     """
     print(f"--- Starting regional scrape for '{region_name}' ---")
+    if use_ai_finder:
+        print("--- AI-powered link finding is ENABLED ---")
 
     target_ids = get_regional_agency_ids(region_name)
 
@@ -69,7 +71,7 @@ def run_scrape_for_region(region_name):
         return
 
     # Now, call the refactored scraping functions with the target list
-    scraper.scrape_all_agencies(target_agency_ids=target_ids)
+    scraper.scrape_all_agencies(target_agency_ids=target_ids, use_ai_finder=use_ai_finder)
     scraper.scrape_news_for_agencies(target_agency_ids=target_ids)
 
     print(f"--- Regional scrape for '{region_name}' complete. ---")
@@ -80,8 +82,9 @@ def main():
     """
     parser = argparse.ArgumentParser(description="Run a targeted regional scrape.")
     parser.add_argument("region_name", type=str, help="The name of the region to scrape (e.g., 'Houston').")
+    parser.add_argument("--ai", action="store_true", help="Enable AI-powered link finding.")
     args = parser.parse_args()
-    run_scrape_for_region(args.region_name)
+    run_scrape_for_region(args.region_name, use_ai_finder=args.ai)
 
 if __name__ == '__main__':
     main()

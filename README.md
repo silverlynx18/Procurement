@@ -33,18 +33,43 @@ The platform is fully containerized using Docker and orchestrated with a single 
 *   **`app` (Dash/Gunicorn):** The user-facing web application. This service runs the interactive dashboard, the conversational UI, and the reporting engine.
 *   **`scheduler` (Cron):** A lightweight, background service whose sole purpose is to run the automated data pipelines (`main_pipeline.py`, `agent_tasks.py`, etc.) on a predefined schedule.
 
+### 3.1. Dual-Database Support (Production vs. Simulation)
+
+To support both robust production deployments and lightweight local testing (e.g., in Google Colab), the application can run on either PostgreSQL or SQLite. This is controlled by the `DB_TYPE` environment variable in the `.env` file.
+
+*   **`DB_TYPE=postgres` (Default/Production):** The application will use the `psycopg2` driver and connect to the PostgreSQL service defined in `docker-compose.yml`. This is the recommended mode for production.
+*   **`DB_TYPE=sqlite` (Simulation/Development):** The application will use the built-in `sqlite3` driver and create a local database file (`local_database.db`). This mode is ideal for local testing and environments without Docker, like Colab.
+
+All database interaction scripts have been refactored to be database-agnostic.
+
 ## 4. Deployment and Operational Guide
 
 ### Phase 1: Initial Setup (One-Time)
 
-1.  **Prerequisites:** Ensure you have Docker and Docker Compose installed on your server.
-2.  **Create Project:** Use the provided `create_project.sh` script to build the entire project directory and all its files.
-3.  **Populate Initial Data:** Place your complete `publicsector.csv` file inside the `data/` directory.
-4.  **Configure Environment:** Open the `.env` file and set the `DB_PASSWORD` and your `NEWS_API_KEY`. You can also change the `OLLAMA_MODEL` if you wish to use an alternative like `phi3`.
-5.  **Build & Start Services:** From the project's root directory, run:
+1.  **Prerequisites:** For production, ensure you have Docker and Docker Compose installed. For local simulation, ensure you have Python 3.10+ installed.
+2.  **Populate Initial Data:** Place your complete `publicsector.csv` file inside the `data/` directory.
+3.  **Configure Environment:** Open the `.env` file and set your desired `DB_TYPE`.
+    *   If using `postgres`, set the `DB_USER`, `DB_PASSWORD`, and `DB_NAME`.
+    *   Set your `NEWS_API_KEY` and `SAM_API_KEY`.
+4.  **Build & Start Services (Production - Docker):**
     ```bash
     docker-compose up --build -d
     ```
+5.  **Install Dependencies (Simulation - Local/Colab):**
+    ```bash
+    pip install -r requirements.txt
+    # Or, if in Colab, run the provided setup script:
+    !bash colab_setup.sh
+    ```
+6.  **Initialize Database:**
+    *   **Production (Docker):**
+        ```bash
+        docker-compose exec scheduler python -m app.database_setup --setup
+        ```
+    *   **Simulation (Local/Colab):**
+        ```bash
+        python -m app.database_setup --setup
+        ```
 6.  **Download LLM Model:** Pull the model specified in your `.env` file into the Ollama service.
     ```bash
     docker-compose exec ollama ollama pull your_model_name

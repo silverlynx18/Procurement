@@ -6,7 +6,8 @@ from app import database
 
 def seed_relationships():
     """
-    Seeds the agency_relationships table for the Houston, TX proof-of-concept (SQLite compatible).
+    Seeds the agency_relationships table for the Houston, TX proof-of-concept.
+    This script is database-agnostic.
     """
     print("--- Seeding Houston-area agency relationships ---")
     conn = database.get_db_connection()
@@ -16,21 +17,19 @@ def seed_relationships():
 
     try:
         cur = conn.cursor()
+        p_style = database.get_param_style()
 
         # 1. Get the agency IDs for the relevant agencies
         agency_names = {
             'parent': 'Houston-Galveston Area Council',
-            'children': [
-                'METRO (Houston)',
-                'Port Houston'
-            ],
+            'children': ['METRO (Houston)', 'Port Houston'],
             'related': 'TxDOT PEPS'
         }
 
         agency_ids = {}
         all_names = [agency_names['parent']] + agency_names['children'] + [agency_names['related']]
         for name in all_names:
-            cur.execute("SELECT agency_id FROM agencies WHERE name = ?", (name,))
+            cur.execute(f"SELECT agency_id FROM agencies WHERE name = {p_style}", (name,))
             result = cur.fetchone()
             if result:
                 agency_ids[name] = result[0]
@@ -44,7 +43,7 @@ def seed_relationships():
         parent_id = agency_ids[agency_names['parent']]
 
         # 2. Get the structure_id for the "Component Of" relationship
-        cur.execute("SELECT structure_id FROM governmental_structures WHERE name = 'Component Of'")
+        cur.execute(f"SELECT structure_id FROM governmental_structures WHERE name = {p_style}", ('Component Of',))
         structure_result = cur.fetchone()
         if not structure_result:
             print("  - CRITICAL: Could not find 'Component Of' relationship type. Aborting.")
@@ -52,21 +51,24 @@ def seed_relationships():
         component_of_id = structure_result[0]
 
         # 3. Insert the relationships
-        relationships_to_add = [
-            agency_ids.get('METRO (Houston)'),
-            agency_ids.get('Port Houston')
-        ]
+        relationships_to_add = [agency_ids.get(name) for name in agency_names['children']]
 
         for child_id in relationships_to_add:
             if child_id:
                 print(f"  - Linking child agency {child_id} to parent {parent_id}")
                 try:
-                    cur.execute(
-                        "INSERT INTO agency_relationships (parent_agency_id, child_agency_id, structure_id) VALUES (?, ?, ?)",
-                        (parent_id, child_id, component_of_id)
-                    )
-                except conn.IntegrityError:
-                    print(f"    - Relationship for child {child_id} already exists. Skipping.")
+                    sql = f"INSERT INTO agency_relationships (parent_agency_id, child_agency_id, structure_id) VALUES ({p_style}, {p_style}, {p_style})"
+                    # Add ON CONFLICT for postgres, otherwise let it raise an exception for sqlite
+                    if database.get_db_type() == 'postgres':
+                        sql += " ON CONFLICT DO NOTHING"
+
+                    cur.execute(sql, (parent_id, child_id, component_of_id))
+
+                except Exception as e: # Catch IntegrityError from sqlite or others
+                    if "UNIQUE constraint failed" in str(e):
+                         print(f"    - Relationship for child {child_id} already exists. Skipping.")
+                    else:
+                        raise e
 
         conn.commit()
         print("--- Houston-area relationships seeded successfully. ---")
