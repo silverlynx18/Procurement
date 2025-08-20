@@ -36,6 +36,16 @@ def get_param_style():
     """Returns the parameter style placeholder for the current DB type."""
     return '?' if DB_TYPE == 'sqlite' else '%s'
 
+def get_insert_prefix():
+    """
+    Returns the appropriate 'INSERT' prefix for the current DB, handling
+    the 'OR IGNORE' syntax for SQLite.
+    """
+    return "INSERT OR IGNORE" if DB_TYPE == 'sqlite' else "INSERT"
+
 def get_on_conflict_clause():
-    """Returns the appropriate ON CONFLICT clause for the current DB type."""
-    return 'ON CONFLICT DO NOTHING' if DB_TYPE == 'postgres' else 'OR IGNORE'
+    """
+    Returns the appropriate ON CONFLICT clause for the current DB type.
+    For SQLite, this is handled by the prefix, so it returns an empty string.
+    """
+    return 'ON CONFLICT DO NOTHING' if DB_TYPE == 'postgres' else ''

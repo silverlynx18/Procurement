@@ -1,0 +1,7 @@
+{
+    "METRO (Houston)": {
+        "procurement_url": "https://www.ridemetro.org/about/business-to-business/procurement-opportunities",
+        "item_selector": "a[href*=\"ridemetro.bonfirehub.com/opportunities/\"]",
+        "title_is_link_text": true
+    }
+}

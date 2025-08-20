@@ -6,6 +6,7 @@ import io
 import sys
 import json
 from urllib.parse import urljoin
+from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -72,55 +73,96 @@ def find_document_links_with_ai(html_content):
         print(f"      - ERROR connecting to the AI model or parsing its response: {e}")
         return []
 
-def download_documents_from_url(driver, agency_id, conn, page_url, doc_type, use_ai_finder=False):
+def download_documents_from_url(driver, agency_id, agency_name, conn, page_url, doc_type, selectors, use_ai_finder=False):
     try:
-        driver.get(page_url)
-        time.sleep(2)  # Allow time for dynamic content to load
+        if selectors:
+            print(f"      - Using custom selectors for '{agency_name}'")
+            item_selector = selectors.get('item_selector')
+            if not item_selector:
+                print("        - ERROR: 'item_selector' not defined in selectors_config. Skipping.")
+                return
 
-        doc_urls = []
-        if use_ai_finder:
-            html_content = driver.page_source
-            ai_urls = find_document_links_with_ai(html_content)
-            # Make sure URLs are absolute
-            doc_urls = [urljoin(page_url, url) for url in ai_urls]
-        else:
-            # Fallback to simple PDF link finding
-            pdf_links = driver.find_elements(By.TAG_NAME, 'a')
-            doc_urls = {urljoin(page_url, link.get_attribute('href')) for link in pdf_links if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
-
-        cur = conn.cursor()
-        p_style = database.get_param_style()
-
-        print(f"      - Found {len(doc_urls)} links to process.")
-        for doc_url in doc_urls:
-            cur.execute(f"SELECT 1 FROM documents WHERE url = {p_style}", (doc_url,))
-            if cur.fetchone(): continue
-
-            print(f"        - Downloading document: {doc_url}")
-            try:
-                response = requests.get(doc_url, headers={'User-Agent': USER_AGENT}, timeout=30)
+            items = []
+            # Special handling for sites that block Selenium, using requests instead.
+            if agency_name == "METRO (Houston)":
+                print("        - Using 'requests' for METRO (Houston) to avoid blocking.")
+                response = requests.get(page_url, headers={'User-Agent': USER_AGENT})
                 response.raise_for_status()
+                soup = BeautifulSoup(response.content, 'html.parser')
+                items = soup.select(item_selector)
+            else:
+                driver.get(page_url)
+                time.sleep(2)
+                items = driver.find_elements(By.CSS_SELECTOR, item_selector)
 
-                # Basic check for PDF content type
-                if 'application/pdf' not in response.headers.get('Content-Type', ''):
-                    print("          - Skipping non-PDF link.")
-                    continue
+            print(f"      - Found {len(items)} items using selector '{item_selector}'")
 
-                text = extract_text_from_pdf(response.content)
-                if text:
-                    now_func = "NOW()" if database.get_db_type() == 'postgres' else "datetime('now')"
-                    sql = f"INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES ({p_style}, {p_style}, {p_style}, {p_style}, {now_func}, {p_style}) {database.get_on_conflict_clause()}"
+            cur = conn.cursor()
+            p_style = database.get_param_style()
 
-                    try:
-                        cur.execute(sql, (agency_id, doc_type, doc_url, text, datetime.now().date()))
-                    except Exception as e:
-                        if "UNIQUE constraint failed" in str(e): pass
-                        else: raise e
+            for item in items:
+                # Handle both BeautifulSoup tags and Selenium elements
+                doc_url = item.get('href') if hasattr(item, 'get') else item.get_attribute('href')
+                title = item.text.strip()
+
+                if not doc_url: continue
+                doc_url = urljoin(page_url, doc_url)
+
+                cur.execute(f"SELECT 1 FROM documents WHERE url = {p_style}", (doc_url,))
+                if cur.fetchone(): continue
+
+                print(f"        - Found solicitation: '{title}' at {doc_url}")
+                raw_text = f"Title: {title}\nURL: {doc_url}"
+                now_func = "NOW()" if database.get_db_type() == 'postgres' else "datetime('now')"
+                sql = f"{database.get_insert_prefix()} INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES ({p_style}, {p_style}, {p_style}, {p_style}, {now_func}, {p_style}) {database.get_on_conflict_clause()}"
+                try:
+                    cur.execute(sql, (agency_id, 'Solicitation', doc_url, raw_text, datetime.now().date()))
+                except Exception as e:
+                    if "UNIQUE constraint failed" in str(e): pass
+                    else: raise e
                 conn.commit()
-            except requests.RequestException as e:
-                print(f"          - ERROR downloading document: {e}")
-                pass
-    except WebDriverException as e:
+
+        else:
+            print(f"      - No custom selectors for '{agency_name}'. Falling back to default methods.")
+            driver.get(page_url)
+            time.sleep(2)
+            doc_urls = []
+            if use_ai_finder:
+                html_content = driver.page_source
+                ai_urls = find_document_links_with_ai(html_content)
+                doc_urls = [urljoin(page_url, url) for url in ai_urls]
+            else:
+                pdf_links = driver.find_elements(By.TAG_NAME, 'a')
+                doc_urls = {urljoin(page_url, link.get_attribute('href')) for link in pdf_links if link.get_attribute('href') and link.get_attribute('href').lower().endswith('.pdf')}
+
+            cur = conn.cursor()
+            p_style = database.get_param_style()
+            print(f"      - Found {len(doc_urls)} links to process.")
+            for doc_url in doc_urls:
+                cur.execute(f"SELECT 1 FROM documents WHERE url = {p_style}", (doc_url,))
+                if cur.fetchone(): continue
+
+                print(f"        - Downloading document: {doc_url}")
+                try:
+                    response = requests.get(doc_url, headers={'User-Agent': USER_AGENT}, timeout=30)
+                    response.raise_for_status()
+                    if 'application/pdf' not in response.headers.get('Content-Type', ''):
+                        print("          - Skipping non-PDF link.")
+                        continue
+                    text = extract_text_from_pdf(response.content)
+                    if text:
+                        now_func = "NOW()" if database.get_db_type() == 'postgres' else "datetime('now')"
+                        sql = f"INSERT INTO documents (agency_id, document_type, url, raw_text, scraped_date, publication_date) VALUES ({p_style}, {p_style}, {p_style}, {p_style}, {now_func}, {p_style}) {database.get_on_conflict_clause()}"
+                        try:
+                            cur.execute(sql, (agency_id, doc_type, doc_url, text, datetime.now().date()))
+                        except Exception as e:
+                            if "UNIQUE constraint failed" in str(e): pass
+                            else: raise e
+                    conn.commit()
+                except requests.RequestException as e:
+                    print(f"          - ERROR downloading document: {e}")
+                    pass
+    except (WebDriverException, requests.RequestException) as e:
         print(f"      - ERROR accessing page {page_url}: {e}")
         pass
 
@@ -130,6 +172,14 @@ def scrape_all_agencies(target_agency_ids=None, use_ai_finder=False):
     conn = database.get_db_connection()
     if not driver or not conn: return
     cur = conn.cursor()
+
+    try:
+        with open('data/selectors.json', 'r') as f:
+            selectors_config = json.load(f)
+        print("    - Successfully loaded data/selectors.json")
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"    - WARNING: Could not load or parse data/selectors.json: {e}. Proceeding without custom selectors.")
+        selectors_config = {}
 
     if target_agency_ids:
         print(f"    - Scraping for {len(target_agency_ids)} target agencies.")
@@ -142,10 +192,18 @@ def scrape_all_agencies(target_agency_ids=None, use_ai_finder=False):
 
     for agency_id, name, planning_url, minutes_url in agencies:
         print(f"    - Checking '{name}' for documents...")
-        if planning_url:
-            download_documents_from_url(driver, agency_id, conn, planning_url, "Planning Document", use_ai_finder)
-        if minutes_url:
-            download_documents_from_url(driver, agency_id, conn, minutes_url, "Meeting Minutes", use_ai_finder)
+        agency_selectors = selectors_config.get(name, {})
+
+        if "procurement_url" in agency_selectors:
+            # If a custom procurement URL is defined, use it exclusively
+            print(f"      - Found custom procurement URL in config.")
+            download_documents_from_url(driver, agency_id, name, conn, agency_selectors["procurement_url"], "Solicitation", agency_selectors, use_ai_finder)
+        else:
+            # Otherwise, fall back to the DB-defined planning and minutes URLs
+            if planning_url:
+                download_documents_from_url(driver, agency_id, name, conn, planning_url, "Planning Document", agency_selectors, use_ai_finder)
+            if minutes_url:
+                download_documents_from_url(driver, agency_id, name, conn, minutes_url, "Meeting Minutes", agency_selectors, use_ai_finder)
 
     driver.quit()
     conn.close()
@@ -181,7 +239,7 @@ def scrape_news_for_agencies(target_agency_ids=None):
             if not articles: continue
 
             for a in articles[:5]:
-                sql = f"INSERT {database.get_on_conflict_clause()} INTO news_articles (agency_id, article_url, title, source_name, published_date, content) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()})"
+                sql = f"{database.get_insert_prefix()} INTO news_articles (agency_id, article_url, title, source_name, published_date, content) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}) {database.get_on_conflict_clause()}"
                 cur.execute(sql, (agency_id, a['url'], a['title'], a['source']['name'], a['publishedAt'], a.get('description')))
             conn.commit()
             time.sleep(1)
@@ -231,7 +289,7 @@ def scrape_historical_solicitations_from_sam(years=5):
                         url = opp.get('uiLink')
 
                         if release_date and title and url:
-                            sql = f"INSERT {database.get_on_conflict_clause()} INTO historical_solicitations (agency_id, release_date, title, url, keywords) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()})"
+                            sql = f"{database.get_insert_prefix()} INTO historical_solicitations (agency_id, release_date, title, url, keywords) VALUES ({database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}, {database.get_param_style()}) {database.get_on_conflict_clause()}"
                             keywords_val = ncode if database.get_db_type() == 'sqlite' else [ncode]
                             cur.execute(sql, (agency_id, release_date, title, url, keywords_val))
 
