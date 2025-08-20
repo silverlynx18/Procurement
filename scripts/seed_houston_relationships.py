@@ -1,23 +1,27 @@
 import sys
 import os
-# Add the parent directory to the path to allow imports from `app`
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from app import database
 
-def seed_relationships():
+# This script is now designed to be imported as a module.
+# The functions are called by the master simulation script.
+
+def seed_relationships(db_module):
     """
     Seeds the agency_relationships table for the Houston, TX proof-of-concept.
     This script is database-agnostic.
+
+    Args:
+        db_module: The database module (app.database) passed in to avoid
+                   circular imports.
     """
     print("--- Seeding Houston-area agency relationships ---")
-    conn = database.get_db_connection()
+    conn = db_module.get_db_connection()
     if not conn:
         print("CRITICAL: Could not connect to the database.")
         return
 
     try:
         cur = conn.cursor()
-        p_style = database.get_param_style()
+        p_style = db_module.get_param_style()
 
         # 1. Get the agency IDs for the relevant agencies
         agency_names = {
@@ -53,18 +57,17 @@ def seed_relationships():
         # 3. Insert the relationships
         relationships_to_add = [agency_ids.get(name) for name in agency_names['children']]
 
+        # Define the INSERT statement with ON CONFLICT handling
+        on_conflict = "ON CONFLICT(parent_agency_id, child_agency_id, structure_id) DO NOTHING" if db_module.get_db_type() == 'postgres' else "OR IGNORE"
+        sql = f"INSERT {on_conflict} INTO agency_relationships (parent_agency_id, child_agency_id, structure_id) VALUES ({p_style}, {p_style}, {p_style})"
+
         for child_id in relationships_to_add:
             if child_id:
                 print(f"  - Linking child agency {child_id} to parent {parent_id}")
                 try:
-                    sql = f"INSERT INTO agency_relationships (parent_agency_id, child_agency_id, structure_id) VALUES ({p_style}, {p_style}, {p_style})"
-                    # Add ON CONFLICT for postgres, otherwise let it raise an exception for sqlite
-                    if database.get_db_type() == 'postgres':
-                        sql += " ON CONFLICT DO NOTHING"
-
                     cur.execute(sql, (parent_id, child_id, component_of_id))
-
-                except Exception as e: # Catch IntegrityError from sqlite or others
+                except Exception as e:
+                    # This broad exception is for SQLite versions that don't support ON CONFLICT
                     if "UNIQUE constraint failed" in str(e):
                          print(f"    - Relationship for child {child_id} already exists. Skipping.")
                     else:
@@ -76,6 +79,3 @@ def seed_relationships():
     finally:
         if conn:
             conn.close()
-
-if __name__ == '__main__':
-    seed_relationships()

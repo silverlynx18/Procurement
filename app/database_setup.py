@@ -4,16 +4,22 @@ import random
 import json
 import pandas as pd
 from faker import Faker
-from app import database
 
-def create_enhanced_tables():
+# This script is now designed to be imported as a module.
+# The functions are called by the master simulation script.
+
+# To prevent circular imports, we pass the database module as an argument
+# instead of importing it at the top level.
+
+def create_enhanced_tables(db_module):
     """Creates the full database schema for the configured DB_TYPE."""
-    conn = database.get_db_connection()
+    conn = db_module.get_db_connection()
     if not conn: return
 
-    db_type = database.get_db_type()
+    db_type = db_module.get_db_type()
     cur = conn.cursor()
 
+    # The schema definitions are now fully agnostic.
     if db_type == 'postgres':
         commands = [
             "DO $$ BEGIN CREATE TYPE validation_status AS ENUM ('unverified', 'correct', 'incorrect'); EXCEPTION WHEN duplicate_object THEN null; END $$;",
@@ -51,8 +57,8 @@ def create_enhanced_tables():
     conn.close()
     print(f"  - All tables created successfully for {db_type}.")
 
-def seed_agencies():
-    conn = database.get_db_connection()
+def seed_agencies(db_module):
+    conn = db_module.get_db_connection()
     if not conn: return
     cur = conn.cursor()
 
@@ -72,7 +78,7 @@ def seed_agencies():
     df = df[['Agency Name', 'State', 'Agency Type', 'URL', 'Planning Website URL', 'Public Minutes URL', 'Latitude', 'Longitude']].copy()
     df.columns = ['name', 'state', 'agency_type', 'procurement_url', 'planning_url', 'minutes_url', 'latitude', 'longitude']
 
-    p_style = database.get_param_style()
+    p_style = db_module.get_param_style()
     sql = f"INSERT INTO agencies (name, state, agency_type, procurement_url, planning_url, minutes_url, latitude, longitude) VALUES ({p_style}, {p_style}, {p_style}, {p_style}, {p_style}, {p_style}, {p_style}, {p_style})"
 
     for _, row in df.iterrows():
@@ -82,15 +88,15 @@ def seed_agencies():
     conn.close()
     print(f"  - Seeded {len(df)} agencies.")
 
-def seed_structures():
-    conn = database.get_db_connection()
+def seed_structures(db_module):
+    conn = db_module.get_db_connection()
     if not conn: return
     cur = conn.cursor()
 
     types = [('Member Of', 'Child is a member of parent.', 0.75), ('Component Of', 'Child is a sub-unit of parent.', 0.9), ('Overseen By', 'Parent has oversight.', 0.4), ('Funded By', 'Parent provides funding.', 0.8)]
 
-    p_style = database.get_param_style()
-    on_conflict = "ON CONFLICT (name) DO NOTHING" if database.get_db_type() == 'postgres' else "OR IGNORE"
+    p_style = db_module.get_param_style()
+    on_conflict = "ON CONFLICT (name) DO NOTHING" if db_module.get_db_type() == 'postgres' else "OR IGNORE"
     sql = f"INSERT {on_conflict} INTO governmental_structures (name, description, influence_weight) VALUES ({p_style}, {p_style}, {p_style})"
 
     for name, desc, weight in types:
@@ -100,41 +106,10 @@ def seed_structures():
     conn.close()
     print("  - Governmental structure types seeded.")
 
-def initial_setup():
-    db_type = database.get_db_type()
+def initial_setup(db_module):
+    db_type = db_module.get_db_type()
     print(f"--- Performing Initial One-Time Database Setup ({db_type}) ---")
-    create_enhanced_tables()
-    seed_agencies()
-    seed_structures()
-    print(f"\\n--- Initial {db_type.capitalize()} Setup Complete ---")
-
-# Mock data generation is complex to make DB-agnostic and not priority.
-# It will be left as-is for now (Postgres compatible).
-def generate_mock_data():
-    print("--- Mock data generation is currently only supported for PostgreSQL ---")
-    if database.get_db_type() != 'postgres':
-        return
-
-    Faker.seed(0)
-    fake = Faker()
-    print("--- Generating Mock Data for Dashboard Proofing ---")
-    conn = database.get_db_connection()
-    if not conn: return
-    with conn.cursor() as cur:
-        cur.execute("TRUNCATE predictions, extracted_entities, documents, news_articles RESTART IDENTITY;")
-        cur.execute("SELECT agency_id FROM agencies;")
-        agency_ids = [row[0] for row in cur.fetchall()]
-    for agency_id in agency_ids:
-        with conn.cursor() as cur:
-            cur.execute("INSERT INTO predictions (agency_id, prediction_date, prob_12_months) VALUES (%s, NOW(), %s);", (agency_id, random.uniform(0.05, 0.95)))
-            cur.execute("INSERT INTO documents (agency_id, document_type, raw_text, scraped_date) VALUES (%s, 'Planning Document', %s, NOW()) RETURNING document_id;", (agency_id, fake.paragraph()))
-            doc_id = cur.fetchone()[0]
-            cur.execute("INSERT INTO extracted_entities (source_id, source_type, entity_text, entity_label, context_sentence) VALUES (%s, 'document', %s, 'ITS_TECHNOLOGY', %s);", (doc_id, random.choice(['V2X', 'Smart Corridor']), fake.sentence()))
-    conn.commit()
-    conn.close()
-    print("--- Mock Data Generation Complete ---")
-
-if __name__ == '__main__':
-    if len(sys.argv) > 1 and sys.argv[1] == '--setup': initial_setup()
-    elif len(sys.argv) > 1 and sys.argv[1] == '--mock': generate_mock_data()
-    else: print("Usage: python -m app.database_setup [--setup | --mock]")
+    create_enhanced_tables(db_module)
+    seed_agencies(db_module)
+    seed_structures(db_module)
+    print(f"--- Initial {db_type.capitalize()} Setup Complete ---")

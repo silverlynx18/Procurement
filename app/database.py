@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import psycopg2
 
 # Determine the database type from environment variables
 DB_TYPE = os.environ.get('DB_TYPE', 'postgres').lower()
@@ -19,6 +18,7 @@ def get_db_connection():
             print(f"SQLITE DATABASE CONNECTION ERROR: {e}")
             return None
     elif DB_TYPE == 'postgres':
+        import psycopg2
         try:
             conn = psycopg2.connect(os.environ.get('DATABASE_URL'))
             return conn

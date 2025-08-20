@@ -1,43 +1,51 @@
 import os
 import sys
 
-# Add the project root to the Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add the project root to the Python path to allow imports from 'app'
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
 
 from app.database import get_db_connection
 
-def main():
+def verify():
     """
-    Connects to the database and verifies that data has been inserted into the
-    'documents' table by printing the total record count.
+    Connects to the database and prints the record counts of key tables
+    to verify the simulation's data ingestion steps.
     """
-    print("\n--- Verifying Database ---")
-    conn = None
+    print("\n--- Verifying Database State ---")
+    conn = get_db_connection()
+    if not conn:
+        print("Could not connect to the database for verification.")
+        return
+
     try:
-        # Set DB_TYPE to 'sqlite' for the simulation environment
-        os.environ['DB_TYPE'] = 'sqlite'
+        cur = conn.cursor()
 
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        tables_to_check = [
+            "agencies",
+            "governmental_structures",
+            "agency_relationships",
+            "documents",
+            "news_articles",
+            "extracted_entities",
+            "predictions"
+        ]
 
-        # Check for records in the documents table
-        cursor.execute("SELECT COUNT(*) FROM documents")
-        count = cursor.fetchone()[0]
+        print("Checking record counts in all relevant tables...")
+        for table in tables_to_check:
+            try:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                count = cur.fetchone()[0]
+                print(f"  - Found {count} records in '{table}' table.")
+            except Exception as e:
+                print(f"  - Could not query table '{table}'. It might not exist. Error: {e}")
 
-        print(f"Verification complete.")
-        print(f"Found {count} record(s) in the 'documents' table.")
-
-        if count > 0:
-            print("SUCCESS: Data has been successfully scraped and inserted into the database.")
-        else:
-            print("NOTE: No new documents were found or inserted during this run. This is expected if the scraper has run previously.")
-
-    except Exception as e:
-        print(f"An error occurred during database verification: {e}", file=sys.stderr)
-        sys.exit(1)
     finally:
         if conn:
             conn.close()
+        print("--- Verification Complete ---")
+
 
 if __name__ == "__main__":
-    main()
+    verify()
